@@ -210,7 +210,8 @@ img { display: block; max-width: 100%; height: auto; }
   text-wrap: balance;
 }
 
-.hero__title .w { display: inline-block; overflow: hidden; padding-bottom: 0.06em; margin-bottom: -0.06em; }
+/* The word box clips letters rising in; it reaches far enough down to keep descenders (g, y, р, у) whole. */
+.hero__title .w { display: inline-block; overflow: hidden; padding-bottom: 0.26em; margin-bottom: -0.26em; }
 .hero__title .c { display: inline-block; will-change: transform; }
 
 .hero__subtitle {
@@ -860,7 +861,7 @@ img { display: block; max-width: 100%; height: auto; }
 }
 
 /* Words that animate one by one. */
-.sw { display: inline-block; will-change: transform; }
+.sw { display: inline-block; }
 
 @media (prefers-reduced-motion: reduce) {
   .ambient, .opener__ambient, .opener__run { display: none; }
@@ -1106,3 +1107,7 @@ img { display: block; max-width: 100%; height: auto; }
 }
 /* The heading column stays one screen wide; only the card strip is wider. */
 .scene--levels { grid-template-columns: minmax(0, 100vw); }
+
+/* Mobile browsers ignore overflow clipping on the root when sizing the page, so text that is still
+   sliding in from the right made the whole page wider than the screen. Clip inside the page instead. */
+main, .foot { overflow-x: clip; }

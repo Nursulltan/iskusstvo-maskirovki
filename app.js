@@ -95,6 +95,8 @@
   function initScroll() {
     if (!hasGsap) return;
     gsap.registerPlugin(ScrollTrigger);
+    // Phones resize the viewport when the address bar hides; re-measuring every pin then makes the page jump.
+    ScrollTrigger.config({ ignoreMobileResize: true });
     if (reduced || typeof Lenis === "undefined") return;
     lenis = new Lenis({ lerp: 0.11, smoothWheel: true });
     lenis.on("scroll", ScrollTrigger.update);
@@ -169,10 +171,15 @@
     lens.y = lerp(lens.y, lens.ty, 0.2);
     lens.r = lerp(lens.r, lens.tr, 0.14);
     if (lens.r < 0.5 && lens.tr === 0) lens.r = 0;
+    // Writing the variables restyles the masked title, so skip it while the lens is at rest.
+    const key = lens.x.toFixed(1) + "|" + lens.y.toFixed(1) + "|" + lens.r.toFixed(1);
+    if (key === lensKey) return;
+    lensKey = key;
     hero.style.setProperty("--lx", lens.x.toFixed(1) + "px");
     hero.style.setProperty("--ly", lens.y.toFixed(1) + "px");
     hero.style.setProperty("--lr", lens.r.toFixed(1) + "px");
   }
+  let lensKey = "";
 
   function cardTextures(backWords) {
     const W = 512, H = 640;
@@ -453,7 +460,14 @@
       let visible = false;
       new IntersectionObserver(([en]) => { visible = en.isIntersecting; }).observe(sec);
       const tx = () => gsap.getProperty(track, "x");
-      const centre = (el, x) => (x + el.offsetLeft + el.offsetWidth / 2) / innerWidth;
+      // Element offsets inside the strip only change on resize; reading them every frame forced re-layout.
+      const mids = new Map();
+      ScrollTrigger.addEventListener("refreshInit", () => mids.clear());
+      const centre = (el, x) => {
+        let m = mids.get(el);
+        if (m === undefined) { m = el.offsetLeft + el.offsetWidth / 2; mids.set(el, m); }
+        return (x + m) / innerWidth;
+      };
       let frame = () => {};
 
       if (sec.dataset.inter === "feed") {
@@ -499,7 +513,16 @@
           words.forEach((w) => w.style.setProperty("--strike", clamp01((0.55 - centre(w, x)) * 3).toFixed(3)));
         };
       }
-      gsap.ticker.add(() => { if (visible) { lean(); frame(); } });
+      let lastX = NaN;
+      gsap.ticker.add(() => {
+        if (!visible) return;
+        lean();
+        const x = tx();
+        if (x === lastX) return; // the strip has not moved: every element is already where it should be
+        lastX = x;
+        frame();
+      });
+      ScrollTrigger.addEventListener("refresh", () => { lastX = NaN; });
     });
   }
 
@@ -523,7 +546,11 @@
       .fromTo(post, { x: () => innerWidth, rotation: 14, opacity: 1 }, { x: 0, rotation: -2, duration: 0.7, ease: "power3.out" }, "<0.3")
       .fromTo(end, { x: () => innerWidth * 0.6, opacity: 0 }, { x: 0, opacity: 1, duration: 0.5, ease: "power3.out" }, "<0.35")
       // The post lifts a corner: the tag is still underneath.
-      .to(post, { rotation: 9, y: () => innerHeight * 0.04, xPercent: 48, duration: 0.5, ease: "power2.inOut" })
+      .to(post, {
+        // On a narrow screen the post slides down instead of right, so it stays on screen and the tag shows above it.
+        rotation: 9, duration: 0.5, ease: "power2.inOut",
+        y: () => innerHeight * (innerWidth < 640 ? 0.09 : 0.04), xPercent: () => (innerWidth < 640 ? 8 : 48),
+      })
       .to({}, { duration: 0.35 })
       .to([post, word], { x: () => -innerWidth * 1.1, rotation: -12, opacity: 0, duration: 0.6, stagger: 0.08, ease: "power3.in" });
   }
@@ -714,17 +741,27 @@
       const cur = links.find((l) => l.getAttribute("aria-current"));
       if (cur) a.href = a.getAttribute("href").split("#")[0] + "#" + cur.dataset.target;
     }));
-    return () => {
+    let last = -2, queued = false, max = 0;
+    const measure = () => { max = document.documentElement.scrollHeight - innerHeight; };
+    measure();
+    addEventListener("resize", measure);
+    if (hasGsap) ScrollTrigger.addEventListener("refresh", measure);
+    const update = () => {
+      queued = false;
       const line = innerHeight * 0.4;
       let cur = -1;
       secs.forEach((s, i) => { if (s && s.getBoundingClientRect().top < line) cur = i; });
-      links.forEach((a, i) => {
-        a.classList.toggle("is-read", i < cur);
-        if (i === cur) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current");
-      });
-      const max = document.documentElement.scrollHeight - innerHeight;
+      if (cur !== last) {
+        last = cur;
+        links.forEach((a, i) => {
+          a.classList.toggle("is-read", i < cur);
+          if (i === cur) a.setAttribute("aria-current", "true"); else a.removeAttribute("aria-current");
+        });
+      }
       bar.style.setProperty("--read", max > 0 ? (scrollY / max).toFixed(4) : 0);
     };
+    // Scroll events can fire several times per frame; do the work once per frame.
+    return () => { if (!queued) { queued = true; requestAnimationFrame(update); } };
   }
 
   /* ---------- Boot ---------- */

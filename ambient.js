@@ -110,7 +110,7 @@
     },
 
     // Chapter 4: a halftone camouflage that hides a word. The deeper you read, the clearer it gets.
-    halftone(w, h, s, word) {
+    halftone(w, h, s, word, hole) {
       const step = 13 * s, off = document.createElement("canvas");
       off.width = Math.max(1, Math.round(w / step)); off.height = Math.max(1, Math.round(h / step));
       const o = off.getContext("2d");
@@ -135,14 +135,24 @@
       const mask = o.getImageData(0, 0, off.width, off.height).data;
       return (c, t, p) => {
         const reveal = clamp(p * 1.3);
-        for (let j = 0; j < off.height; j++) for (let i = 0; i < off.width; i++) {
-          const inWord = mask[(j * off.width + i) * 4 + 3] > 128 ? 1 : 0;
-          const noise = 0.5 + 0.5 * Math.sin(i * 0.7 + t * 1.3) * Math.cos(j * 0.6 - t);
-          const v = (1 - reveal) * noise + reveal * (inWord ? 1 : 0.12);
-          const rad = v * step * 0.45;
-          if (rad < 0.4) continue;
-          c.beginPath(); c.arc(i * step + step / 2, j * step + step / 2, rad, 0, TAU); c.fill();
+        // One path for all dots (dots never overlap, so one fill looks the same as thousands),
+        // and no dots under the text column, where the mask hides them anyway.
+        c.beginPath();
+        for (let i = 0; i < off.width; i++) {
+          const x = i * step + step / 2;
+          if (hole && x > hole[0] && x < hole[1]) continue;
+          const si = Math.sin(i * 0.7 + t * 1.3);
+          for (let j = 0; j < off.height; j++) {
+            const inWord = mask[(j * off.width + i) * 4 + 3] > 128 ? 1 : 0;
+            const noise = 0.5 + 0.5 * si * Math.cos(j * 0.6 - t);
+            const v = (1 - reveal) * noise + reveal * (inWord ? 1 : 0.12);
+            const rad = v * step * 0.45;
+            if (rad < 0.4) continue;
+            const y = j * step + step / 2;
+            c.moveTo(x + rad, y); c.arc(x, y, rad, 0, TAU);
+          }
         }
+        c.fill();
       };
     },
 
@@ -168,18 +178,20 @@
     },
 
     // Chapter 6: can trust be measured — a field of ticking counters.
-    numbers(w, h, s) {
+    numbers(w, h, s, word, hole) {
       const cw = 42 * s, chh = 30 * s, cols = Math.ceil(w / cw), rows = Math.ceil(h / chh);
       const r = rng(5), cells = Array.from({ length: cols * rows }, () => ({ v: Math.floor(r() * 100), rate: 0.3 + r() * 2.5, ph: r() * 10 }));
       return (c, t, p) => {
         c.font = `600 ${13 * s}px Geologica, sans-serif`;
         c.textAlign = "center"; c.textBaseline = "middle";
         cells.forEach((cell, i) => {
-          const x = (i % cols) * cw + cw / 2, y = Math.floor(i / cols) * chh + chh / 2;
+          const x = (i % cols) * cw + cw / 2;
+          if (hole && x > hole[0] && x < hole[1]) return; // under the text column: masked out anyway
+          const y = Math.floor(i / cols) * chh + chh / 2;
           const v = Math.floor(cell.v + t * cell.rate + cell.ph) % 100;
           // As the chapter goes on, more counters freeze into "≠": a number is not trust.
           const frozen = ((i * 2654435761) % 997) / 997 < p * 0.35;
-          c.fillText(frozen ? "≠" : String(v).padStart(2, "0"), x, y);
+          c.fillText(frozen ? "≠" : DIGITS[v], x, y);
         });
       };
     },
@@ -230,6 +242,7 @@
   };
 
   function lerp(a, b, t) { return a + (b - a) * t; }
+  const DIGITS = Array.from({ length: 100 }, (_, i) => String(i).padStart(2, "0"));
 
   const MODE_BY_CHAPTER = {
     intro: "feed", ch1: "story", ch2: "network", ch3: "power", ch4: "halftone",
@@ -239,15 +252,15 @@
 
   /** A canvas that runs one painter at a time and crossfades between painters. */
   class Stage {
-    constructor(canvas, { scale, color, alpha }) {
+    constructor(canvas, { scale, color, alpha, margin, dprCap }) {
       this.canvas = canvas;
       this.c = canvas.getContext("2d");
-      this.scale = scale; this.color = color; this.alpha = alpha;
+      this.scale = scale; this.color = color; this.alpha = alpha; this.margin = !!margin; this.dprCap = dprCap || 1.5;
       this.layers = []; // { mode, draw, fade }
       this.resize();
     }
     resize() {
-      const dpr = Math.min(devicePixelRatio || 1, 1.5);
+      const dpr = Math.min(devicePixelRatio || 1, this.dprCap);
       const r = this.canvas.getBoundingClientRect();
       this.w = r.width; this.h = r.height;
       this.canvas.width = Math.max(1, Math.round(r.width * dpr));
@@ -262,7 +275,14 @@
       if (top && top.mode === mode) return;
       const make = PAINTERS[mode];
       if (!make) return;
-      this.layers.push({ mode, draw: make(this.w, this.h, this.scale, WORD), fade: instant ? 1 : 0 });
+      this.layers.push({ mode, draw: make(this.w, this.h, this.scale, WORD, this.hole()), fade: instant ? 1 : 0 });
+    }
+    // The band the CSS mask makes fully transparent over the text column (same formula as .ambient in CSS).
+    hole() {
+      if (!this.margin || this.w <= 960) return null;
+      const gutter = Math.min(56, Math.max(20, this.w * 0.04));
+      const l = Math.max(gutter, (this.w - 640) * 0.36);
+      return [l, l + Math.min(640, this.w - gutter * 2)];
     }
     frame(t, p) {
       const c = this.c;
@@ -293,7 +313,7 @@
     field.setAttribute("aria-hidden", "true");
     document.body.prepend(field);
     const narrow = matchMedia("(max-width: 60rem)").matches;
-    const margin = new Stage(field, { scale: 1, color: "#1e2be8", alpha: narrow ? 0.07 : 0.2 });
+    const margin = new Stage(field, { scale: 1, color: "#1e2be8", alpha: narrow ? 0.07 : 0.2, margin: true, dprCap: narrow ? 1 : 1.5 });
     addEventListener("resize", () => margin.resize());
 
     // 2) One layer inside each chapter opener.
