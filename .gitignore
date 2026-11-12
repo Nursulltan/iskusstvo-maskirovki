@@ -1,0 +1,16 @@
+# Only the published site goes to GitHub; working files stay local.
+*
+!.gitignore
+!.nojekyll
+!index.html
+!en.html
+!styles.css
+!app.js
+!ambient.js
+!assets/
+!assets/aidar.jpg
+!assets/mukasheva.jpg
+!fonts/
+!fonts/**
+!vendor/
+!vendor/**
