@@ -66,28 +66,51 @@
   }
 
   const SVGNS = "http://www.w3.org/2000/svg";
+  const svgEl = (svg, tag, attrs) => {
+    const n = document.createElementNS(SVGNS, tag);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    return svg.appendChild(n);
+  };
+
+  // Scanpath without numbers: dashed saccades, a dot per fixation (lime when it lands on the ad)
+  // and a pulsing ring on the latest one, so the eye reads as moving.
   function drawGaze(svg, pts, count) {
     while (svg.firstChild) svg.firstChild.remove();
     const n = Math.min(count, pts.length);
     for (let i = 1; i < n; i++) {
-      const l = document.createElementNS(SVGNS, "line");
-      l.setAttribute("x1", pts[i - 1].x); l.setAttribute("y1", pts[i - 1].y);
-      l.setAttribute("x2", pts[i].x); l.setAttribute("y2", pts[i].y);
-      svg.appendChild(l);
+      svgEl(svg, "line", { x1: pts[i - 1].x, y1: pts[i - 1].y, x2: pts[i].x, y2: pts[i].y });
     }
     for (let i = 0; i < n; i++) {
       const p = pts[i];
-      const c = document.createElementNS(SVGNS, "circle");
-      c.setAttribute("cx", p.x); c.setAttribute("cy", p.y); c.setAttribute("r", p.r);
-      svg.appendChild(c);
-      const t = document.createElementNS(SVGNS, "text");
-      t.setAttribute("x", p.x); t.setAttribute("y", p.y); t.textContent = i + 1;
-      svg.appendChild(t);
+      svgEl(svg, "circle", { cx: p.x, cy: p.y, r: p.ad ? 3 + p.dur * 2.6 : 2.5 + p.dur * 1.6, class: p.ad ? "fx fx--ad" : "fx" });
+    }
+    if (n > 0) {
+      const p = pts[n - 1];
+      svgEl(svg, "circle", { cx: p.x, cy: p.y, r: 13, class: "eye__pulse" });
+      svgEl(svg, "circle", { cx: p.x, cy: p.y, r: 11, class: p.ad ? "eye eye--ad" : "eye" });
     }
   }
 
-  const place = (box, list) =>
-    list.map(([fx, fy, dur = 1]) => ({ x: fx * box.width, y: fy * box.height, r: 6 + dur * 5, dur }));
+  // Fixations are given relative to an element inside the mock, so they land on the same
+  // thing at every screen size. The ad flag comes from the DOM, not from the list.
+  const placeOn = (root, list) => {
+    const b = root.getBoundingClientRect();
+    return list.map(([sel, fx, fy, dur]) => {
+      const el = root.querySelector(sel);
+      const r = el.getBoundingClientRect();
+      return {
+        x: r.left - b.left + fx * r.width, y: r.top - b.top + fy * r.height, dur,
+        ad: !!el.closest(".is-ad, .disc-label"),
+      };
+    });
+  };
+
+  // size: glow radius scale, so small phones on mobile do not drown in lime.
+  const heatPath = (heat, pts, k, size = 1) => {
+    heat.clear();
+    pts.slice(0, k).forEach((pt) => heat.add(pt.x, pt.y, (20 + pt.dur * 16) * size, (0.3 + 0.25 * pt.dur) * (0.6 + 0.4 * size)));
+    heat.render();
+  };
 
   /* ---------- Smooth scroll ---------- */
 
@@ -563,22 +586,33 @@
   }
 
   function sceneBanner(el) {
+    const post = ".feed__banner + .feed__post";
     const paths = [
-      [[0.5, 0.55, 1.4], [0.3, 0.5, 1], [0.7, 0.6, 1.2], [0.4, 0.72, 0.9], [0.25, 0.83, 0.8], [0.6, 0.86, 0.7], [0.5, 0.95, 0.6], [0.92, 0.12, 0.25]],
-      [[0.5, 0.3, 1.6], [0.45, 0.4, 2], [0.55, 0.36, 1.8], [0.3, 0.12, 0.8], [0.5, 0.48, 1.6], [0.35, 0.58, 1.2], [0.62, 0.62, 1], [0.48, 0.34, 1.4]],
+      // Banner: the eye works through the posts and only brushes the banner once.
+      [[post + " .feed__img", 0.5, 0.45, 1.3], [post + " .feed__img", 0.28, 0.62, 1], [post + " .feed__img", 0.74, 0.38, 1.1],
+       [post + " .feed__lines", 0.25, 0.5, 0.9], [post + " .feed__lines", 0.7, 0.5, 0.8], [".feed__banner", 0.9, 0.25, 0.35],
+       [".feed__post--next .feed__head", 0.3, 0.5, 0.7], [".feed__post--next .feed__img", 0.5, 0.4, 0.9]],
+      // Native post: the same product inside a post holds the eye.
+      [[".feed__post--ad .feed__head", 0.25, 0.5, 0.8], [".feed__post--ad .prod", 0.5, 0.4, 1.6], [".feed__post--ad .prod", 0.5, 0.68, 1.8],
+       [".feed__post--ad .feed__img", 0.22, 0.3, 0.9], [".feed__post--ad .prod", 0.55, 0.25, 1.4], [".feed__post--ad .feed__lines", 0.3, 0.5, 1.1],
+       [".feed__post--ad .feed__lines", 0.72, 0.5, 0.9], [".feed__post--next .feed__head", 0.3, 0.5, 0.6]],
     ];
+    // Each phone plays in its own step: banner in step 1, native post in step 2.
+    const windows = [[0.02, 0.3], [0.36, 0.63]];
+    const share = [1 / 1.53, 1]; // +53% for the native post
     const units = [...el.querySelectorAll(".phone__screen")].map((screen, i) => ({
-      screen, heat: new Heat(screen.querySelector(".heat"), 0.5), svg: screen.querySelector(".gaze"), path: paths[i], pts: [],
+      screen, heat: new Heat(screen.querySelector(".heat"), 0.5), svg: screen.querySelector(".gaze"),
+      bar: screen.closest(".stage-banner__col").querySelector(".attn"), path: paths[i], win: windows[i], pts: [], last: -1,
     }));
     const num = el.querySelector(".stage__num");
-    let last = -1;
     const layout = () => {
-      last = -1;
       units.forEach((u) => {
+        u.last = -1;
         u.heat.resize();
         const b = u.screen.getBoundingClientRect();
         u.svg.setAttribute("viewBox", `0 0 ${b.width} ${b.height}`);
-        u.pts = place(b, u.path);
+        u.pts = placeOn(u.screen, u.path);
+        u.size = clamp(b.width / 230, 0.55, 1);
       });
     };
     layout();
@@ -586,18 +620,19 @@
       el, layout,
       update(p) {
         setStep(el, p);
-        const k = Math.round(clamp(p / 0.66) * 8);
-        if (k !== last) {
-          last = k;
-          units.forEach((u) => {
-            u.heat.clear();
-            u.pts.slice(0, k).forEach((pt) => u.heat.add(pt.x, pt.y, 26 + pt.dur * 16, 0.42 * pt.dur));
-            u.heat.render();
-            drawGaze(u.svg, u.pts, k);
-          });
-        }
+        el.classList.toggle("is-b", p >= 0.33);
         el.classList.toggle("is-final", p > 0.66);
-        num.textContent = "+" + Math.round(53 * easeOut(clamp((p - 0.66) / 0.22))) + "%";
+        const grow = easeOut(clamp((p - 0.68) / 0.2));
+        units.forEach((u, i) => {
+          const k = Math.round(clamp((p - u.win[0]) / (u.win[1] - u.win[0])) * u.pts.length);
+          if (k !== u.last) {
+            u.last = k;
+            heatPath(u.heat, u.pts, k, u.size);
+            drawGaze(u.svg, u.pts, k);
+          }
+          u.bar.style.setProperty("--a", (share[i] * grow).toFixed(3));
+        });
+        num.textContent = "+" + Math.round(53 * grow) + "%";
       },
     };
   }
@@ -610,39 +645,61 @@
     const mock = el.querySelector(".article-mock");
     const heat = new Heat(mock.querySelector(".heat"), 0.5);
     const svg = mock.querySelector(".gaze");
-    const num = el.querySelector(".meter__num"), where = el.querySelector(".meter__where"), meter = el.querySelector(".meter");
-    let pts = { top: [], mid: [] }, lastKey = "";
+    const ring = mock.querySelector(".disc-ring");
+    const labels = { top: mock.querySelector(".disc-label--top"), mid: mock.querySelector(".disc-label--mid") };
+    const dots = [...el.querySelectorAll(".crowd i")];
+    const num = el.querySelector(".meter__num"), where = el.querySelector(".meter__where");
+    const line = (n) => `.article-mock__body > span:nth-child(${n})`;
+    const start = [[".am-h1", 0.15, 0.5, 1.2], [".am-h1", 0.7, 0.5, 1], [".am-h2", 0.4, 0.5, 0.9], [".am-p1", 0.2, 0.5, 0.8]];
+    // Header label: the eye goes from the headline straight into the text and never reaches the corner.
+    const TOP = [...start, [line(3), 0.6, 0.5, 0.8], [line(5), 0.3, 0.5, 0.7], [line(8), 0.6, 0.5, 0.7], [line(10), 0.35, 0.5, 0.6]];
+    // Label inside the text: reading runs straight into it.
+    const MID = [...start, [line(3), 0.5, 0.5, 0.7], [".disc-label--mid", 0.4, 0.5, 2], [".disc-label--mid", 0.8, 0.5, 1.4], [line(9), 0.4, 0.5, 0.7]];
+    let pts = { top: [], mid: [] }, boxes = {}, lastKey = "", lastLit = -1, lastMid = null;
     const layout = () => {
-      lastKey = "";
+      lastKey = ""; lastMid = null;
       heat.resize();
       const b = mock.getBoundingClientRect();
       svg.setAttribute("viewBox", `0 0 ${b.width} ${b.height}`);
-      const l = mock.querySelector(".disc-label--mid").getBoundingClientRect();
-      const ly = (l.top - b.top + l.height / 2) / b.height, lx = (l.left - b.left + l.width / 2) / b.width;
-      pts.top = place(b, [[0.3, 0.12, 1.2], [0.6, 0.14, 1], [0.2, 0.3, 1], [0.55, 0.33, 0.9], [0.3, 0.42, 0.8], [0.7, 0.56, 0.8], [0.25, 0.7, 0.7], [0.6, 0.84, 0.6]]);
-      pts.mid = place(b, [[0.3, 0.12, 1.2], [0.6, 0.14, 1], [0.2, 0.3, 1], [0.55, 0.33, 0.9], [lx, ly, 2], [lx + 0.06, ly + 0.02, 1.4], [0.3, 0.7, 0.8], [0.6, 0.84, 0.7]]);
+      pts.top = placeOn(mock, TOP);
+      pts.mid = placeOn(mock, MID);
+      for (const k in labels) {
+        const r = labels[k].getBoundingClientRect(), pad = 6;
+        // The mid label slides 0.5rem while it fades in; measure its resting place.
+        const dy = k === "mid" && !el.classList.contains("is-mid") ? 8 : 0;
+        boxes[k] = { x: r.left - b.left - pad, y: r.top - b.top - pad + dy, w: r.width + pad * 2, h: r.height + pad * 2 };
+      }
     };
     layout();
     return {
       el, layout,
       update(p) {
         setStep(el, p);
-        const mid = p >= 0.4;
+        const mid = p >= 0.33;
         el.classList.toggle("is-mid", mid);
+        if (mid !== lastMid) {
+          lastMid = mid;
+          const r = boxes[mid ? "mid" : "top"];
+          ring.style.translate = `${r.x}px ${r.y}px`;
+          ring.style.width = r.w + "px";
+          ring.style.height = r.h + "px";
+          where.textContent = mid ? el.dataset.midLabel : el.dataset.topLabel;
+        }
         const set = mid ? pts.mid : pts.top;
-        const k = Math.round((mid ? clamp((p - 0.4) / 0.4) : clamp(p / 0.35)) * set.length);
+        const k = Math.round((mid ? clamp((p - 0.36) / 0.27) : clamp((p - 0.02) / 0.28)) * set.length);
         const key = (mid ? "m" : "t") + k;
         if (key !== lastKey) {
           lastKey = key;
-          heat.clear();
-          set.slice(0, k).forEach((pt) => heat.add(pt.x, pt.y, 30 + pt.dur * 18, 0.42 * pt.dur));
-          heat.render();
+          heatPath(heat, set, k);
           drawGaze(svg, set, k);
         }
-        const value = mid ? lerp(7, 40, easeOut(clamp((p - 0.55) / 0.3))) : 7;
-        meter.style.setProperty("--m", value.toFixed(1));
-        num.textContent = Math.round(value) + (value >= 39.5 ? "%+" : "%");
-        where.textContent = mid ? el.dataset.midLabel : el.dataset.topLabel;
+        const value = lerp(7, 40, easeOut(clamp((p - 0.68) / 0.2)));
+        const lit = Math.round(value);
+        if (lit !== lastLit) {
+          lastLit = lit;
+          dots.forEach((d, i) => d.classList.toggle("on", i < lit));
+        }
+        num.textContent = lit + (lit >= 40 ? "%+" : "%");
       },
     };
   }
@@ -681,6 +738,7 @@
       scrollTrigger: {
         trigger: el, start: "top top", end: () => "+=" + Math.round(innerHeight * 1.3 + dist()),
         pin: true, scrub: 1, invalidateOnRefresh: true, anticipatePin: 1,
+        toggleClass: { targets: el, className: "is-live" },
       },
     })
       .fromTo(cards, { x: () => innerWidth * 0.9, rotation: 9, opacity: 0 }, { x: 0, rotation: 0, opacity: 1, ease: "power3.out", duration: 1, stagger: 0.3 })
